@@ -195,8 +195,9 @@ export function Badge({ label, tone = "neutral", icon, dot }) {
 const betStatus = {
   active: { label: "Live", tone: "accent" },
   funding: { label: "Funding", tone: "warn" },
-  resolved: { label: "Settled", tone: "neutral" },
+  resolved: { label: "Dispute window", tone: "warn" },
   disputed: { label: "Disputed", tone: "loss" },
+  final: { label: "Final", tone: "neutral" },
   claimable: { label: "Claimable", tone: "win" },
 };
 
@@ -208,6 +209,7 @@ export function StatusBadge({ status }) {
 const outcomeMap = {
   success: { label: "Made it", tone: "win", icon: "checkmark" },
   fail: { label: "Missed", tone: "loss", icon: "close" },
+  refunded: { label: "Refunded", tone: "info", icon: "refresh" },
   pending: { label: "In play", tone: "neutral", icon: "time-outline" },
 };
 

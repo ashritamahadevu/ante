@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { router } from "expo-router";
 import { api } from "../api";
+import { getToken } from "../session";
 import { colors, fonts, radius, space } from "../theme";
 import { Badge, Body, Button, Display, ErrorText, Ionicons, Muted, Row, Screen } from "../ui";
 import { signInWithDeviceKey } from "../wallet";
@@ -27,7 +28,15 @@ export default function Welcome() {
     setBusy(true);
     setError("");
     try {
-      const user = await signInWithDeviceKey();
+      let user = null;
+      if (await getToken()) {
+        try {
+          user = (await api("/v1/me")).user;
+        } catch {
+          user = null;
+        }
+      }
+      if (!user) user = await signInWithDeviceKey();
       if (!user.ageConfirmed) {
         await api("/v1/me/age", { method: "POST", json: { confirmed: true } });
       }

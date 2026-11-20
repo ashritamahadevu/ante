@@ -11,6 +11,7 @@ import {
   Badge,
   Button,
   Card,
+  Chip,
   Display,
   EmptyState,
   ErrorText,
@@ -47,8 +48,16 @@ function ReactionChip({ icon, label, count, active, tone, onPress }) {
   );
 }
 
+function outcomeWord(outcome) {
+  if (outcome === "success") return "made it";
+  if (outcome === "fail") return "missed";
+  if (outcome === "refunded") return "refunded";
+  return outcome;
+}
+
 function Contender({ participant, proofs, required, isMe }) {
   const done = Math.min(proofs, required);
+  const reporterDiffers = participant.reporterOutcome && participant.reporterOutcome !== participant.outcome;
   return (
     <View style={styles.contender}>
       <Avatar name={participant.user.displayName} seed={participant.user.walletPubkey} size={56} />
@@ -57,6 +66,9 @@ function Contender({ participant, proofs, required, isMe }) {
         {isMe ? <Text style={{ color: colors.faint }}> (you)</Text> : null}
       </Text>
       <OutcomeBadge outcome={participant.outcome} />
+      {reporterDiffers ? (
+        <Muted style={{ fontSize: 11, textAlign: "center" }}>Reporter said {outcomeWord(participant.reporterOutcome)}</Muted>
+      ) : null}
       <View style={{ width: "100%", gap: 6, marginTop: 4 }}>
         <ProgressBar value={done / required} color={done >= required ? colors.win : colors.accent} />
         <Muted style={{ fontSize: 12, textAlign: "center" }}>
@@ -153,15 +165,53 @@ function ProofCard({ proof, me, draft, onDraft, onComment, onReact, onReport }) 
   );
 }
 
+function formatWhen(value) {
+  if (!value) return "the deadline";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "the deadline";
+  return date.toLocaleString();
+}
+
+function statusLine(bet) {
+  const label =
+    {
+      active: "In progress",
+      resolved: "Dispute window open",
+      disputed: "Dispute in progress",
+      final: "Final",
+    }[bet.status] ?? bet.status;
+  if (bet.status === "active") return `${label} until ${formatWhen(bet.periodEnd)}`;
+  if (bet.status === "resolved" || bet.status === "disputed") {
+    return `${label} until ${formatWhen(bet.dispute?.deadline)}`;
+  }
+  return label;
+}
+
+function ballotLine(ballot, nameFor) {
+  const rows = Array.isArray(ballot.outcomes) ? ballot.outcomes : [];
+  const summary = rows.map((row) => `${nameFor(row.userId)} ${outcomeWord(row.outcome)}`).join(", ");
+  const demo = ballot.demo ? ` · demo vote by ${ballot.castBy?.displayName ?? "the owner"}` : "";
+  return `${ballot.voter.displayName}${demo}: ${summary}`;
+}
+
+const RESOLUTION = {
+  unchallenged: "The dispute window closed with no challenge. The reporter's result stands.",
+  upheld: "A strict majority upheld the reporter's result.",
+  overturned: "A strict majority overturned the reporter's result.",
+  void: "No strict majority before the window closed. Everyone is refunded.",
+};
+
 export default function BetScreen() {
   const { id } = useLocalSearchParams();
   const [bet, setBet] = useState(null);
   const [me, setMe] = useState(null);
   const [caption, setCaption] = useState("");
   const [drafts, setDrafts] = useState({});
+  const [choices, setChoices] = useState({});
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [closingWindow, setClosingWindow] = useState(false);
 
   const load = useCallback(() => {
     api(`/v1/bets/${id}`)
@@ -172,6 +222,16 @@ export default function BetScreen() {
       .catch(() => {});
   }, [id]);
   useFocusEffect(load);
+
+  async function reporterPost(path, body) {
+    const response = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-reporter-key": "dev-reporter" },
+      body: JSON.stringify(body ?? {}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Request failed");
+  }
 
   async function addProof() {
     setError("");
@@ -238,18 +298,58 @@ export default function BetScreen() {
     setError("");
     setClosing(true);
     try {
-      const response = await fetch(`${API_URL}/v1/bets/${id}/resolve`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-reporter-key": "dev-reporter" },
-        body: JSON.stringify({ early: true }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Resolve failed");
+      await reporterPost(`/v1/bets/${id}/resolve`, { early: true });
       load();
     } catch (err) {
       setError(err.message);
     } finally {
       setClosing(false);
+    }
+  }
+
+  async function openDispute() {
+    setError("");
+    try {
+      await api(`/v1/bets/${id}/dispute`, { method: "POST" });
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function closeDispute() {
+    setError("");
+    setClosingWindow(true);
+    try {
+      await reporterPost(`/v1/bets/${id}/dispute/close`);
+      load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setClosingWindow(false);
+    }
+  }
+
+  async function castVote(asUserId) {
+    if (!bet) return;
+    setError("");
+    const outcomes = bet.participants.map((participant) => ({
+      userId: participant.user.id,
+      outcome: choices[participant.user.id],
+    }));
+    if (outcomes.some((row) => row.outcome !== "success" && row.outcome !== "fail")) {
+      setError("Choose success or fail for every person.");
+      return;
+    }
+    try {
+      await api(`/v1/bets/${id}/votes`, {
+        method: "POST",
+        json: asUserId ? { outcomes, asUserId } : { outcomes },
+      });
+      setChoices({});
+      load();
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -262,6 +362,18 @@ export default function BetScreen() {
   const winners = bet.participants.filter((p) => p.outcome === "success");
   const headToHead = bet.betType === "head_to_head" && bet.participants.length === 2;
 
+  const nameFor = (userId) => bet.participants.find((participant) => participant.user.id === userId)?.user.displayName ?? "Someone";
+  const eligible = bet.dispute?.eligibleVoters ?? [];
+  const ballots = bet.dispute?.ballots ?? [];
+  const voted = new Set(ballots.map((ballot) => ballot.voter.id));
+  const roles = bet.viewer?.roles ?? [];
+  const canVoteSelf = eligible.some((person) => person.id === bet.viewer?.userId) && !voted.has(bet.viewer?.userId);
+  const demoVoters = roles.includes("owner")
+    ? eligible.filter((person) => person.practice && person.id !== bet.viewer?.userId && !voted.has(person.id))
+    : [];
+  const showBallot = canVoteSelf || demoVoters.length > 0;
+  const finalWon = bet.status === "final" && winners.length > 0;
+
   return (
     <Screen>
       <Stack.Screen options={{ title: "" }} />
@@ -273,6 +385,7 @@ export default function BetScreen() {
           {active ? <Badge label={timeLeft(bet.periodEnd)} tone="info" icon="time-outline" /> : null}
         </Row>
         <Display size={34}>{bet.title}</Display>
+        {bet.status !== "active" ? <Muted>{statusLine(bet)}</Muted> : null}
       </View>
 
       <Card tone="accent" style={{ gap: space.lg }}>
@@ -297,15 +410,33 @@ export default function BetScreen() {
         </View>
       </Card>
 
-      {!active && winners.length > 0 ? (
-        <Card style={{ borderColor: "rgba(74,222,128,0.35)", backgroundColor: colors.winSoft }}>
-          <Row gap={12}>
-            <Ionicons name="trophy" size={22} color={colors.win} />
-            <Text style={{ color: colors.text, fontFamily: fonts.bodySemi, fontSize: 15, flex: 1 }}>
-              {winners.length === bet.participants.length
-                ? "Everyone made it. Stakes go back to each person."
-                : `${winners.map((w) => w.user.displayName).join(" & ")} took the pot.`}
-            </Text>
+      {bet.status === "final" ? (
+        <Card
+          style={
+            finalWon
+              ? { borderColor: "rgba(74,222,128,0.35)", backgroundColor: colors.winSoft }
+              : undefined
+          }
+        >
+          <Row gap={12} align="flex-start">
+            <Ionicons name={finalWon ? "trophy" : "shield-checkmark"} size={22} color={finalWon ? colors.win : colors.muted} />
+            <View style={{ flex: 1, gap: 6 }}>
+              <Text style={{ color: colors.text, fontFamily: fonts.bodySemi, fontSize: 15 }}>
+                {RESOLUTION[bet.dispute?.resolution] ?? "The circle has a final result."}
+              </Text>
+              {finalWon ? (
+                <Text style={{ color: colors.text, fontFamily: fonts.body, fontSize: 14 }}>
+                  {winners.length === bet.participants.length
+                    ? "Everyone made it. Stakes go back to each person."
+                    : `${winners.map((w) => w.user.displayName).join(" & ")} took the pot.`}
+                </Text>
+              ) : null}
+              {ballots.map((ballot) => (
+                <Muted key={ballot.voter.id} style={{ fontSize: 13 }}>
+                  {ballotLine(ballot, nameFor)}
+                </Muted>
+              ))}
+            </View>
           </Row>
         </Card>
       ) : null}
@@ -329,6 +460,95 @@ export default function BetScreen() {
           ))}
         </Row>
       </Card>
+
+      {bet.status === "resolved" ? (
+        <Card tone="raised">
+          <Row gap={10} align="flex-start">
+            <Ionicons name="flag" size={18} color={colors.warn} />
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={{ color: colors.text, fontFamily: fonts.displayMedium, fontSize: 17 }}>Dispute window</Text>
+              <Muted style={{ fontSize: 13 }}>
+                Open until {formatWhen(bet.dispute?.deadline)}. A circle member can challenge the reporter. On devnet the
+                disputer posts a deposit. This preview records the challenge in the circle.
+              </Muted>
+            </View>
+          </Row>
+          <Button label="Open a dispute" icon="flag-outline" tone="danger" onPress={openDispute} />
+          <Button
+            label="Close dispute window (demo)"
+            icon="flash-outline"
+            tone="secondary"
+            size="sm"
+            fill={false}
+            loading={closingWindow}
+            onPress={closeDispute}
+          />
+        </Card>
+      ) : null}
+
+      {bet.status === "disputed" ? (
+        <Card>
+          <Text style={{ color: colors.text, fontFamily: fonts.displayMedium, fontSize: 17 }}>Dispute</Text>
+          <Muted>
+            {bet.dispute?.disputer ? `${bet.dispute.disputer.displayName} opened this dispute. ` : ""}A strict majority
+            of the voters decides each person's success or fail. Until then the standings above are the reporter's result.
+          </Muted>
+          <Muted>Voters: {eligible.map((person) => person.displayName).join(", ") || "none yet"}</Muted>
+          {eligible.length === 0 ? (
+            <Muted>Nobody can vote. Add a practice partner who is not in the bet, or assign judges when you open the bet.</Muted>
+          ) : null}
+          {ballots.map((ballot) => (
+            <Muted key={ballot.voter.id}>{ballotLine(ballot, nameFor)}</Muted>
+          ))}
+          {showBallot ? (
+            <>
+              <Muted>Vote made it or missed for each person.</Muted>
+              {bet.participants.map((participant) => (
+                <View key={participant.user.id} style={{ gap: 8 }}>
+                  <Text style={{ color: colors.text, fontFamily: fonts.bodySemi, fontSize: 15 }}>
+                    {participant.user.displayName}
+                  </Text>
+                  <Row gap={8} style={{ flexWrap: "wrap" }}>
+                    <Chip
+                      label="Made it"
+                      selected={choices[participant.user.id] === "success"}
+                      onPress={() => setChoices((current) => ({ ...current, [participant.user.id]: "success" }))}
+                    />
+                    <Chip
+                      label="Missed"
+                      selected={choices[participant.user.id] === "fail"}
+                      onPress={() => setChoices((current) => ({ ...current, [participant.user.id]: "fail" }))}
+                    />
+                  </Row>
+                </View>
+              ))}
+              {canVoteSelf ? <Button label="Cast your vote" icon="checkmark" onPress={() => castVote()} /> : null}
+              {demoVoters.map((person) => (
+                <Button
+                  key={person.id}
+                  label={`Demo: vote as ${person.displayName}`}
+                  tone="secondary"
+                  onPress={() => castVote(person.id)}
+                />
+              ))}
+              {demoVoters.length > 0 ? (
+                <Muted>A demo vote is you casting that ballot for a practice partner, on this one device.</Muted>
+              ) : null}
+            </>
+          ) : (
+            <Muted>Waiting on the other voters.</Muted>
+          )}
+          <Button
+            label="Close dispute window (demo)"
+            icon="flash-outline"
+            tone="secondary"
+            size="sm"
+            fill={false}
+            loading={closingWindow}
+            onPress={closeDispute}
+          />
+        </Card>
+      ) : null}
 
       {active && amIn ? (
         <Card tone="raised">
@@ -460,8 +680,8 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.text,
     fontFamily: fonts.body,
-    fontSize: 14,
     paddingVertical: 6,
+    fontSize: 14,
     outlineStyle: "none",
   },
   hash: { color: colors.faint, fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11 },

@@ -19,6 +19,7 @@ import {
   Muted,
   Row,
   Screen,
+  Tap,
   SectionHeader,
   Segmented,
   Skeleton,
@@ -130,12 +131,19 @@ export default function Circles() {
           headerTitle: () => <Wordmark size={18} />,
           headerRight: () =>
             me ? (
-              <Row gap={8} style={{ marginRight: 4 }}>
-                <Text style={{ color: colors.muted, fontFamily: fonts.bodyMedium, fontSize: 13 }}>
-                  {shortKey(me.walletPubkey)}
-                </Text>
-                <Avatar name={me.displayName} seed={me.walletPubkey} size={28} />
-              </Row>
+              <Tap
+                onPress={() => router.push("/wallet")}
+                accessibilityLabel="Wallet"
+                style={{ marginRight: 4 }}
+              >
+                <Row gap={8}>
+                  <Ionicons name="wallet-outline" size={15} color={colors.muted} />
+                  <Text style={{ color: colors.muted, fontFamily: fonts.bodyMedium, fontSize: 13 }}>
+                    {shortKey(me.walletPubkey)}
+                  </Text>
+                  <Avatar name={me.displayName} seed={me.walletPubkey} size={28} />
+                </Row>
+              </Tap>
             ) : null,
         }}
       />
